@@ -1,0 +1,8 @@
+numpy
+pandas
+spacy
+joblib
+Flask
+geopandas
+folium
+Flask-Cors

@@ -1,0 +1,478 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Resources:
+  
+  SrcS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: yelpapisrcfiles
+
+  WeeklyRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: yelpweeklyrepo
+
+  NightlyRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: yelpnightlyrepo
+
+  MainAPIRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: yelpapirepo
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: DeployWeeklyModelBuild
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        PrivilegedMode: true
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt WeeklyRepo.CloneUrlHttp
+      SourceVersion: refs/heads/main
+
+  NightlyCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: DeployNightlyJobBuild
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        PrivilegedMode: true
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt NightlyRepo.CloneUrlHttp
+      SourceVersion: refs/heads/main
+
+  APICodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: YelpMainAPIJobBuild
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        PrivilegedMode: true
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt MainAPIRepo.CloneUrlHttp
+      SourceVersion: refs/heads/main
+    
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role    
+    Properties:
+      RoleName: CodeBuildCustRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [codebuild.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'logs:*'
+                - 's3:*'
+                - 'codecommit:*'
+                - 'codebuild:*'
+                Effect: Allow
+                Resource: '*'
+
+# ---------------------common steps for pipeline to deploy to EKS-----------------
+
+  KubeDeployRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: kubedeployrepo
+
+  EKSCodeBuildRole:
+    Type: AWS::IAM::Role    
+    Properties:
+      RoleName: codebuild-eks
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [codebuild.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: EKSCodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'logs:*'
+                - 's3:*'
+                - 'codecommit:*'
+                - 'codebuild:*'
+                - 'eks:*'
+                Effect: Allow
+                Resource: '*'
+
+# -------------------------weekly deploy to eks codebuild-----------------------------
+  EKSCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: WeeklyJobEKSDeployBuild
+      ServiceRole: !GetAtt EKSCodeBuildRole.Arn
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        EnvironmentVariables:
+        - Name: AWS_DEFAULT_REGION
+          Type: PLAINTEXT
+          Value: us-east-1
+        - Name: AWS_CLUSTER_NAME
+          Type: PLAINTEXT
+          Value: Yelp-app-vpc-eks-Yelp-app-cluster
+        PrivilegedMode: true
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt WeeklyRepo.CloneUrlHttp
+        BuildSpec: kubebuildspec.yml
+      SourceVersion: refs/heads/main
+
+  # -------------------------nightly deploy to eks codebuild-----------------------------
+  NightlyEKSCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: NightlyJobEKSDeployBuild
+      ServiceRole: !GetAtt EKSCodeBuildRole.Arn
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        EnvironmentVariables:
+        - Name: AWS_DEFAULT_REGION
+          Type: PLAINTEXT
+          Value: us-east-1
+        - Name: AWS_CLUSTER_NAME
+          Type: PLAINTEXT
+          Value: Yelp-app-vpc-eks-Yelp-app-cluster
+        PrivilegedMode: true
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt NightlyRepo.CloneUrlHttp
+        BuildSpec: kubebuildspec.yml
+      SourceVersion: refs/heads/main
+
+# -------------------------API deploy to eks codebuild-----------------------------
+  APIEKSCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: APIJobEKSDeployBuild
+      ServiceRole: !GetAtt EKSCodeBuildRole.Arn
+      Artifacts:
+        Type: no_artifacts
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+        EnvironmentVariables:
+        - Name: AWS_DEFAULT_REGION
+          Type: PLAINTEXT
+          Value: us-east-1
+        - Name: AWS_CLUSTER_NAME
+          Type: PLAINTEXT
+          Value: Yelp-app-vpc-eks-Yelp-app-cluster
+        PrivilegedMode: true
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt MainAPIRepo.CloneUrlHttp
+        BuildSpec: kubebuildspec.yml
+      SourceVersion: refs/heads/main
+  
+
+  CodePipelineTrustRole:
+    Description: Creating service role in IAM for AWS CodePipeline    
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CodePipeCustRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Sid: 1
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketVersioning
+            - s3:PutObject
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codecommit:CancelUploadArchive
+            - codecommit:GetBranch
+            - codecommit:GetCommit
+            - codecommit:GetUploadArchiveStatus
+            - codecommit:UploadArchive
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codebuild:StartBuild
+            - codebuild:BatchGetBuilds
+            - codebuild:StopBuild
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codedeploy:CreateDeployment
+            - codedeploy:GetApplicationRevision
+            - codedeploy:GetDeployment
+            - codedeploy:GetDeploymentConfig
+            - codedeploy:RegisterApplicationRevision
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - cloudformation:DescribeStacks
+            - cloudformation:DescribeChangeSet
+            - cloudformation:CreateChangeSet
+            - cloudformation:DeleteChangeSet
+            - cloudformation:ExecuteChangeSet
+            Effect: Allow
+            Resource: '*'
+        PolicyName: CodePipeCustPol
+    
+  
+  ArtifactsBucket:
+    DeletionPolicy: Delete
+    Description: Creating Amazon S3 bucket for AWS CodePipeline and CodeBuild artifacts
+    Properties:
+      Tags:
+      - Key: Name
+        Value: ekscodepipelineacbucketac
+      VersioningConfiguration:
+        Status: Enabled
+    Type: AWS::S3::Bucket
+
+  # ----------------------pipeline for deploying weekly process to EKS-----------------------------------
+
+  WeeklyReleasePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+    - CodePipelineTrustRole
+    - ArtifactsBucket
+    - EKSCodeBuildProject
+    - WeeklyRepo
+    Description: Creating a deployment pipeline for your project in AWS CodePipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref 'ArtifactsBucket'
+        Type: S3
+      Name: WeeklyEKSDeploypipeline
+      RoleArn: !GetAtt
+      - CodePipelineTrustRole
+      - Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeCommit
+            Version: 1
+          Configuration:
+            BranchName: main
+            PollForSourceChanges: false
+            RepositoryName: !GetAtt WeeklyRepo.Name
+          InputArtifacts: [
+            ]
+          Name: ApplicationSource
+          # OutputArtifacts: [
+
+          # ]
+          OutputArtifacts:
+          - Name: eksbuildsrc
+          RunOrder: 1
+      - Name: BuildDocker
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName: !Ref CodeBuildProject
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: eksbuildsrc
+          Name: ApplicationBuild
+      - Name: DeploytoEKS
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName: !Ref EKSCodeBuildProject
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: eksbuildsrc
+          Name: EKSDeploy
+
+# ----------------------pipeline for deploying daily process to EKS-----------------------------------
+
+  NightlyReleasePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+    - CodePipelineTrustRole
+    - ArtifactsBucket
+    - NightlyCodeBuildProject
+    Description: Creating a deployment pipeline for your project in AWS CodePipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref 'ArtifactsBucket'
+        Type: S3
+      Name: NightlyEKSDeploypipeline
+      RoleArn: !GetAtt
+      - CodePipelineTrustRole
+      - Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeCommit
+            Version: 1
+          Configuration:
+            BranchName: main
+            PollForSourceChanges: false
+            RepositoryName: !GetAtt NightlyRepo.Name
+          InputArtifacts: [
+            ]
+          Name: ApplicationSource
+          # OutputArtifacts: [
+
+          # ]
+          OutputArtifacts:
+          - Name: eksbuildsrc
+          RunOrder: 1
+      - Name: BuildDocker
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName: !Ref NightlyCodeBuildProject
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: eksbuildsrc
+          Name: ApplicationBuild
+      - Name: Build
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName: !Ref NightlyEKSCodeBuildProject
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: eksbuildsrc
+          Name: ApplicationBuild
+
+
+# ----------------------pipeline for deploying API to EKS-----------------------------------
+
+  APIReleasePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+    - CodePipelineTrustRole
+    - ArtifactsBucket
+    - APIEKSCodeBuildProject
+    Description: Creating a deployment pipeline for your project in AWS CodePipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref 'ArtifactsBucket'
+        Type: S3
+      Name: APIEKSDeploypipeline
+      RoleArn: !GetAtt
+      - CodePipelineTrustRole
+      - Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeCommit
+            Version: 1
+          Configuration:
+            BranchName: main
+            PollForSourceChanges: false
+            RepositoryName: !GetAtt MainAPIRepo.Name
+          InputArtifacts: [
+            ]
+          Name: ApplicationSource
+          # OutputArtifacts: [
+
+          # ]
+          OutputArtifacts:
+          - Name: eksbuildsrc
+          RunOrder: 1
+      - Name: BuildDocker
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName: !Ref APICodeBuildProject
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: eksbuildsrc
+          Name: ApplicationBuild
+      - Name: Build
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName: !Ref APIEKSCodeBuildProject
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: eksbuildsrc
+          Name: ApplicationBuild

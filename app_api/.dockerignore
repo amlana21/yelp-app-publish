@@ -1,0 +1,11 @@
+batch_file_prep/*
+batch_file_prep_job/*
+data_files/*
+notebooks/*
+pythonenv3.8/*
+weekly_model_tune_job/*
+business_restrnt_shortV1.json
+pyproject.toml
+pythonenv3.8
+kube_samples/*
+kube*

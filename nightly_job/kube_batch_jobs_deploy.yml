@@ -1,0 +1,48 @@
+apiVersion: batch/v1beta1
+kind: CronJob
+metadata:
+  name: nightly-file-process
+  namespace: yelpapins
+spec:
+  schedule: "*/10 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          imagePullSecrets:
+          - name: appregistrykey
+          volumes:
+            - name: data-files
+              persistentVolumeClaim:
+                claimName: data-file-vol-claim
+          initContainers:
+          - name: init-myservice
+            image: amazon/aws-cli
+            args: ["s3","cp","s3://yelpapisrcfiles",".","--recursive"]
+            env:
+            - name: AWS_ACCESS_KEY_ID
+              value: <access_key>
+            - name: AWS_SECRET_ACCESS_KEY
+              value: <secret_key>
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            volumeMounts:
+              - mountPath: "/aws"
+                name: data-files
+          containers:
+          - name: nightlyfileprocess
+            image: <image_name>
+            env:
+            - name: INPUTBUSINESSFILE
+              value: "data_files/business_data_short_1.json"
+            - name: INPUTREVIEWSFILE
+              value: "data_files/review_short_1.json"
+            - name: INPUTMODELFILE
+              value: "data_files/yelp_model_nlpV1.sav"
+            - name: OUTPUTDATAFILE
+              value: "data_files/reviews_Short_sentiments_nlpV4.json"
+            imagePullPolicy: IfNotPresent
+            volumeMounts:
+              - mountPath: "/home/yelpbackendapp/data_files"
+                name: data-files
+          restartPolicy: OnFailure

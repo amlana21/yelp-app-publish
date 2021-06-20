@@ -1,0 +1,25 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - apt-get update -y
+      - apt-get install -y zip unzip
+    runtime-versions:
+      nodejs: 12
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Compiling the React App
+      - npm install
+      - npm run build
+  post_build:
+    commands:
+      - echo Build completed on `date`
+artifacts:
+  type: zip
+  files:
+    - "**/*"
+  base-directory: 'build'
+  discard-paths: no
+  name: Webapp-$AWS_REGION-$(date +%Y-%m-%d)

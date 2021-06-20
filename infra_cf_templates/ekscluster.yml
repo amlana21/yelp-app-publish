@@ -1,0 +1,592 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  VpcName:
+    Description: Vpc name
+    Type: String
+    Default: Yelp-app-vpc
+
+  VpcRange:
+    Description: CIDR
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1Range:
+    Description: for subnet 1
+    Type: String
+    Default: 10.0.1.0/24
+
+  PublicSubnetEKS1:
+    Description: For AZ-a
+    Type: String
+    Default: 10.0.2.0/24
+
+  PublicSubnetEKS2:
+    Description: For AZ-b
+    Type: String
+    Default: 10.0.3.0/24
+
+  EKSClusterName:
+    Description: Name
+    Type: String
+    Default: Yelp-app-cluster
+
+  NodeInstanceType:
+    Description: Instance type for node group
+    Type: String
+    Default: t3.medium
+
+  NodeAmiOverride:
+    Type: String
+    Default: ''
+
+  NodeGroupDesiredCapacity:
+    Description: Desired
+    Type: Number
+    Default: 2
+    MinValue: 2
+
+  NodeGroupMaxCapacity:
+    Description: Max
+    Type: Number
+    Default: 4
+    MinValue: 4
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: VPC Config
+        Parameters:
+          - VpcName
+          - VpcRange
+      - Label:
+          default: Public Subnet Configuration
+        Parameters:
+          - PublicSubnet1Range
+      - Label:
+          default: EKS Configuration
+        Parameters:
+          - EKSClusterName
+          - PublicSubnetEKS1
+          - PublicSubnetEKS2
+      - Label:
+          default: Worker Nodes Configuration
+        Parameters:
+          - NodeInstanceType
+          - NodeAmiOverride
+    ParameterLabels:
+      VpcName:
+        default: VPC Name
+      VpcRange:
+        default: VPC Range
+      PublicSubnet1Range:
+        default: Public Subnet in AZ a
+      EKSClusterName:
+        default: EKS Cluster
+      PublicSubnetEKS1:
+        default: public subnet for EKS
+      PublicSubnetEKS2:
+        default: public subnet for EKS
+      NodeInstanceType:
+        default: Instance Type
+      NodeAmiOverride:
+        default: Node AMI
+
+Mappings: 
+  AmiMap: 
+    us-east-2:
+      AmiId: ami-027683840ad78d833
+    us-east-1:
+      AmiId: ami-0e609024e4dbce4a5
+    us-west-2:
+      AmiId: ami-00b95829322267382
+    ap-east-1:
+      AmiId: ami-03f8634a8fd592414
+    ap-south-1:
+      AmiId: ami-0062e5b0411e77c1a
+    ap-northeast-1:
+      AmiId: ami-0a67c71d2ab43d36f
+    ap-northeast-2:
+      AmiId: ami-0d66d2fefbc86831a
+    ap-southeast-1:
+      AmiId: ami-06206d907abb34bbc
+    ap-southeast-2:
+      AmiId: ami-09f2d86f2d8c4f77d
+    eu-central-1:
+      AmiId: ami-038bd8d3a2345061f
+    eu-west-1:
+      AmiId: ami-0199284372364b02a
+    eu-west-2:
+      AmiId: ami-0f454b09349248e29
+    eu-west-3:
+      AmiId: ami-00b44348ab3eb2c9f
+    eu-north-1:
+      AmiId: ami-02218be9004537a65
+
+Conditions:
+  Override: !Not [ !Equals [!Ref NodeAmiOverride, '']]
+
+# ----------------------------------------all IAM components----------------------------
+Resources:
+# EKS Service Role
+  EksServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Role to be used by EKS Control Plane
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - eks.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonEKSServicePolicy
+      - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EksServiceRoleCloudWatchMetricPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn: EksServiceRole
+    Properties:
+      #Description: Allow EksServiceRole to Put CloudWatch Metric Data
+      PolicyDocument:
+        Statement:
+        - Action:
+          - cloudwatch:PutMetricData
+          Effect: Allow
+          Resource: "*"
+        Version: '2012-10-17'
+      PolicyName: "CloudWatchMetricPolicy"
+      Roles:
+      - Ref: EksServiceRole
+
+  EksServiceRoleLoadBalancerPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn: EksServiceRole
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action:
+          - elasticloadbalancing:*
+          - ec2:CreateSecurityGroup
+          - ec2:Describe*
+          Effect: Allow
+          Resource: "*"
+        Version: '2012-10-17'
+      PolicyName: "LoadBalancerPolicy"
+      Roles:
+      - Ref: EksServiceRole
+
+# EKS Worker Role
+  EksWorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Role to be used by EKS Worker Node / Instance
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+      - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+      - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Path: "/"
+
+  EksWorkerRoleIngressControllerPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn: EksWorkerRole
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action:
+          - acm:DescribeCertificate
+          - acm:ListCertificates
+          - acm:GetCertificate
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - ec2:AuthorizeSecurityGroupIngress
+          - ec2:CreateSecurityGroup
+          - ec2:CreateTags
+          - ec2:DeleteTags
+          - ec2:DeleteSecurityGroup
+          - ec2:DescribeAccountAttributes
+          - ec2:DescribeAddresses
+          - ec2:DescribeInstances
+          - ec2:DescribeInstanceStatus
+          - ec2:DescribeInternetGateways
+          - ec2:DescribeNetworkInterfaces
+          - ec2:DescribeSecurityGroups
+          - ec2:DescribeSubnets
+          - ec2:DescribeTags
+          - ec2:DescribeVpcs
+          - ec2:ModifyInstanceAttribute
+          - ec2:ModifyNetworkInterfaceAttribute
+          - ec2:RevokeSecurityGroupIngress
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - elasticloadbalancing:AddListenerCertificates
+          - elasticloadbalancing:AddTags
+          - elasticloadbalancing:CreateListener
+          - elasticloadbalancing:CreateLoadBalancer
+          - elasticloadbalancing:CreateRule
+          - elasticloadbalancing:CreateTargetGroup
+          - elasticloadbalancing:DeleteListener
+          - elasticloadbalancing:DeleteLoadBalancer
+          - elasticloadbalancing:DeleteRule
+          - elasticloadbalancing:DeleteTargetGroup
+          - elasticloadbalancing:DeregisterTargets
+          - elasticloadbalancing:DescribeListenerCertificates
+          - elasticloadbalancing:DescribeListeners
+          - elasticloadbalancing:DescribeLoadBalancers
+          - elasticloadbalancing:DescribeLoadBalancerAttributes
+          - elasticloadbalancing:DescribeRules
+          - elasticloadbalancing:DescribeSSLPolicies
+          - elasticloadbalancing:DescribeTags
+          - elasticloadbalancing:DescribeTargetGroups
+          - elasticloadbalancing:DescribeTargetGroupAttributes
+          - elasticloadbalancing:DescribeTargetHealth
+          - elasticloadbalancing:ModifyListener
+          - elasticloadbalancing:ModifyLoadBalancerAttributes
+          - elasticloadbalancing:ModifyRule
+          - elasticloadbalancing:ModifyTargetGroup
+          - elasticloadbalancing:ModifyTargetGroupAttributes
+          - elasticloadbalancing:RegisterTargets
+          - elasticloadbalancing:RemoveListenerCertificates
+          - elasticloadbalancing:RemoveTags
+          - elasticloadbalancing:SetIpAddressType
+          - elasticloadbalancing:SetSecurityGroups
+          - elasticloadbalancing:SetSubnets
+          - elasticloadbalancing:SetWebACL
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - iam:CreateServiceLinkedRole
+          - iam:GetServerCertificate
+          - iam:ListServerCertificates
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - waf-regional:GetWebACLForResource
+          - waf-regional:GetWebACL
+          - waf-regional:AssociateWebACL
+          - waf-regional:DisassociateWebACL
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - tag:GetResources
+          - tag:TagResources
+          Effect: Allow
+          Resource: "*"
+        - Action:
+          - waf:GetWebACL
+          Effect: Allow
+          Resource: "*"
+        Version: '2012-10-17'
+      PolicyName: "IngressControllerPolicy"
+      Roles:
+      - Ref: EksWorkerRole
+
+# EKS Worker Profile
+  EksWorkerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: EksWorkerRole
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: EksWorkerRole
+
+# EKS Access Group
+  EksAccessGroup:
+    Type: AWS::IAM::Group
+    Properties: 
+      GroupName: !Sub "${AWS::StackName}-eks-group-EksAccessGroup"
+
+  EksAccessGroupEksClusterPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn: EksAccessGroup
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action:
+          - eks:DescribeCluster
+          Effect: Allow
+          Resource: !Sub "arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/*"
+        Version: '2012-10-17'
+      PolicyName: "EksClusterPolicy"
+      Groups:
+      - !Ref EksAccessGroup
+
+# --------------------------------------------all networking components below------------------------------------
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcRange
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${VpcName}
+      - Key: !Sub "kubernetes.io/cluster/${EKSClusterName}"
+        Value: 'shared'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub ${VpcName}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DependsOn:
+    - InternetGateway
+    - VPC
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: VPC
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnet1Range
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${VpcName}-public-1
+
+  PublicSubnetAEks:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnetEKS1
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${VpcName}-public-a2-eks-${EKSClusterName}
+      - Key: !Sub "kubernetes.io/cluster/${EKSClusterName}"
+        Value: 'shared'
+      - Key: kubernetes.io/role/elb
+        Value: '1'
+          
+  PublicSubnetBEks:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnetEKS2
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Sub ${VpcName}-public-b1-eks-${EKSClusterName}
+      - Key: !Sub "kubernetes.io/cluster/${EKSClusterName}"
+        Value: 'shared'
+      - Key: kubernetes.io/role/elb
+        Value: '1'
+
+  PublicRouteTable1:
+    Type: AWS::EC2::RouteTable
+    DependsOn: VPC
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${VpcName}-public-route-1
+
+  PublicRouteTable1Default:
+    Type: AWS::EC2::Route
+    DependsOn:
+    - PublicRouteTable1
+    - InternetGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRouteTable1AssocPublicSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+    - PublicRouteTable1
+    - PublicSubnet1
+    Properties:
+      RouteTableId: !Ref PublicRouteTable1
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRouteTable1AssociatePublicSubnet2Eks:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+    - PublicRouteTable1
+    - PublicSubnetAEks
+    Properties:
+      RouteTableId: !Ref PublicRouteTable1
+      SubnetId: !Ref PublicSubnetAEks
+
+  PublicRouteTableA1AssociatePublicSubnetBEks:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+    - PublicRouteTable1
+    - PublicSubnetBEks
+    Properties:
+      RouteTableId: !Ref PublicRouteTable1
+      SubnetId: !Ref PublicSubnetBEks
+
+  NoIngressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn: VPC
+    Properties:
+      GroupName: "no-ingress-sg"
+      GroupDescription: "Security group with no ingress rule"
+      VpcId: !Ref VPC
+
+  EksControlPlaneSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Allowing API request from Nodes and allow out going to all Worker Nodes
+      Tags:
+      - Key: Name
+        Value: !Sub "${VpcName}-eks-${EKSClusterName}-controlplane-sg"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: '0.0.0.0/0'
+        Description: Allow Control Plane to receive API requests from Bastion Host
+
+  EksNodeSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Communication between the Control Plane and Nodes in group standard-workers
+      Tags:
+      - Key: !Sub "kubernetes.io/cluster/${EKSClusterName}"
+        Value: owned
+      - Key: Name
+        Value: !Sub "${VpcName}-eks-${EKSClusterName}-worker-sg"
+
+  EksNodeSgFromEksNodeSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow node to node
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref EksNodeSg
+      GroupId: !Ref EksNodeSg
+      
+  EksNodeSgFromEksCtrllPlaneSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow Control Plane to access all Nodes port 
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref EksControlPlaneSg
+      FromPort: 0
+      ToPort: 65535
+      GroupId: !Ref EksNodeSg
+  
+  EksNodeSgFromallIp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow higher port access on nodes for Nodeport
+      IpProtocol: tcp
+      CidrIp: '0.0.0.0/0'
+      FromPort: 30000
+      ToPort: 65535
+      GroupId: !Ref EksNodeSg
+
+# ------------------------------------------EKS cluster----------------------------
+
+  ControlPlane:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub "${VpcName}-eks-${EKSClusterName}"
+      ResourcesVpcConfig:
+        SecurityGroupIds:
+        - !Ref EksControlPlaneSg
+        SubnetIds:
+        - !Ref PublicSubnetAEks
+        - !Ref PublicSubnetBEks
+      RoleArn:
+        Fn::GetAtt: EksServiceRole.Arn
+      Version: '1.18'
+
+  EKSNodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Sub ${NodeInstanceType}
+        BlockDeviceMappings: 
+          - Ebs:
+              VolumeSize: 8
+              VolumeType: gp2
+              DeleteOnTermination: true
+              Encrypted: false
+            DeviceName: /dev/xvda
+        NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          Groups:
+          - !Ref EksNodeSg
+        
+
+  EKSNodegroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn:
+    - ControlPlane
+    - EKSNodeLaunchTemplate
+    - EksWorkerRole
+    Properties:
+      ClusterName: !Sub "${VpcName}-eks-${EKSClusterName}"
+      AmiType: AL2_x86_64
+      LaunchTemplate: 
+        Id: !Ref EKSNodeLaunchTemplate
+      NodeRole: 
+        Fn::GetAtt: EksWorkerRole.Arn
+      ScalingConfig:
+        MinSize: 2
+        DesiredSize: 2
+        MaxSize: 4
+      Labels:
+        Key1: Value1
+        Key2: Value2
+      Subnets:
+        - !Ref PublicSubnetAEks
+        - !Ref PublicSubnetBEks
+
+Outputs:
+  ClusterName:
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}::ClusterName"
+    Value: !Sub "${VpcName}-eks-${EKSClusterName}"
+
+  ClusterARN:
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}::ClusterARN"
+    Value:
+      Fn::GetAtt: ControlPlane.Arn
+
+  ClusterCertificateAuthority:
+    Value:
+      Fn::GetAtt: ControlPlane.CertificateAuthorityData
+
+  ClusterEndpoint:
+    Export:
+      Name:
+        Fn::Sub: "${AWS::StackName}::ClusterEndpoint"
+    Value:
+      Fn::GetAtt: ControlPlane.Endpoint

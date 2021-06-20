@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  SRCS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: webappbucketac
+      AccessControl: PublicRead
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+  WebBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket:
+        Ref: SRCS3Bucket
+      PolicyDocument:
+          Statement:
+            - Action:
+                - 's3:GetObject'
+              Effect: Allow
+              Principal: "*"
+              Resource:
+                - 'Fn::Join':
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - Ref: SRCS3Bucket
+                      - /*
+
+  cloudfrontdistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: "true"
+        Origins:
+          - DomainName: !GetAtt SRCS3Bucket.DomainName
+            Id: SRCS3BucketOrigin
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          TargetOriginId: SRCS3BucketOrigin
+          ForwardedValues:
+            QueryString: "false"
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+        DefaultRootObject: index.html
+
+  # ---------------------------------------------------deploying CI/CD infra below-----------------------------------
+
+  AppRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: yelrevwpapprepo
+
+  BuildArtifactsBucket:
+    DeletionPolicy: Delete
+    Description: Creating Amazon S3 bucket for AWS CodePipeline and CodeBuild artifacts
+    Properties:
+      Tags:
+      - Key: Name
+        Value: frontendbuildbucketac
+      VersioningConfiguration:
+        Status: Enabled
+    Type: AWS::S3::Bucket
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: MyProject
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Ref 'BuildArtifactsBucket'
+        Name: build
+        Packaging: ZIP
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:4.0
+      Source:
+        Type: CODECOMMIT
+        Location: !GetAtt AppRepo.CloneUrlHttp
+      SourceVersion: refs/heads/main
+    
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: FrntCustCodebuildrole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [codebuild.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'logs:*'
+                - 's3:*'
+                - 'codecommit:*'
+                - 'codebuild:*'
+                Effect: Allow
+                Resource: '*'
+
+  CodePipelineTrustRole:
+    Description: Creating service role in IAM for AWS CodePipeline
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Sid: 1
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketVersioning
+            - s3:PutObject
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codecommit:CancelUploadArchive
+            - codecommit:GetBranch
+            - codecommit:GetCommit
+            - codecommit:GetUploadArchiveStatus
+            - codecommit:UploadArchive
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codebuild:StartBuild
+            - codebuild:BatchGetBuilds
+            - codebuild:StopBuild
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codedeploy:CreateDeployment
+            - codedeploy:GetApplicationRevision
+            - codedeploy:GetDeployment
+            - codedeploy:GetDeploymentConfig
+            - codedeploy:RegisterApplicationRevision
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - cloudformation:DescribeStacks
+            - cloudformation:DescribeChangeSet
+            - cloudformation:CreateChangeSet
+            - cloudformation:DeleteChangeSet
+            - cloudformation:ExecuteChangeSet
+            Effect: Allow
+            Resource: '*'
+        PolicyName: FrntCodePipeCustPol
+      RoleName: FrontendCodePipeCustRole
+    Type: AWS::IAM::Role
+  
+  ArtifactsBucket:
+    DeletionPolicy: Delete
+    Description: Creating Amazon S3 bucket for AWS CodePipeline and CodeBuild artifacts
+    Properties:
+      Tags:
+      - Key: Name
+        Value: frontendcodepipelineacbucket
+      VersioningConfiguration:
+        Status: Enabled
+    Type: AWS::S3::Bucket
+
+  ReleasePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+    - CodePipelineTrustRole
+    - ArtifactsBucket
+    - CodeBuildProject
+    Description: Creating a deployment pipeline for your project in AWS CodePipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref 'ArtifactsBucket'
+        Type: S3
+      Name: FrontEndDeploypipeline
+      RoleArn: !GetAtt
+      - CodePipelineTrustRole
+      - Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeCommit
+            Version: 1
+          Configuration:
+            BranchName: main
+            PollForSourceChanges: false
+            RepositoryName: !GetAtt AppRepo.Name
+          InputArtifacts: [
+            ]
+          Name: ApplicationSource
+          # OutputArtifacts: [
+
+          # ]
+          OutputArtifacts:
+          - Name: buildsrc
+          RunOrder: 1
+      - Name: Build
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Provider: CodeBuild
+            Version: 1
+          Configuration:
+            ProjectName: !Ref CodeBuildProject
+          OutputArtifacts:
+            - Name: buildout
+          InputArtifacts:
+            - Name: buildsrc
+          Name: ApplicationBuild
+      - Name: Deploy
+        Actions:
+        - ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: S3
+            Version: 1
+          Configuration:
+            BucketName: !Ref 'SRCS3Bucket'
+            Extract: true
+          InputArtifacts:
+            - Name: buildout
+          Name: ApplicationDeploy
+        
+Outputs:
+  WebsiteURL:
+    Value:
+      'Fn::GetAtt':
+        - SRCS3Bucket
+        - WebsiteURL
+    Description: URL for website hosted on S3
+  SRCS3BucketSecureURL:
+    Value:
+      'Fn::Join':
+        - ''
+        - - 'https://'
+          - 'Fn::GetAtt':
+              - SRCS3Bucket
+              - DomainName
+    Description: Name of S3 bucket to hold website content

@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Resources:  
+
+  PipelineRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: infrapipelinerepo
+
+  InfraCodePipelineTrustRole:
+    Description: Creating service role in IAM for AWS CodePipeline for infra deploy
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DeployCodePipeCustRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Sid: 1
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketVersioning
+            - s3:PutObject
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codecommit:CancelUploadArchive
+            - codecommit:GetBranch
+            - codecommit:GetCommit
+            - codecommit:GetUploadArchiveStatus
+            - codecommit:UploadArchive
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codebuild:StartBuild
+            - codebuild:BatchGetBuilds
+            - codebuild:StopBuild
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - codedeploy:CreateDeployment
+            - codedeploy:GetApplicationRevision
+            - codedeploy:GetDeployment
+            - codedeploy:GetDeploymentConfig
+            - codedeploy:RegisterApplicationRevision
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - 'cloudformation:*'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - 'iam:PassRole'
+            Effect: Allow
+            Resource: '*'
+        PolicyName: DeployCodePipeCustPol
+      
+
+  CloudFormCodePipelineTrustRole:
+    Description: Creating service role in IAM for AWS CodePipeline for infra deploy
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CFCodePipeCustRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - cloudformation.amazonaws.com
+          Sid: 1
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            AWS:
+            - <change_this _to_iam_user_arn>
+          Sid: 2
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - 'cloudformation:*'
+            - 'iam:PassRole'
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - '*'
+            Effect: Allow
+            Resource: '*'
+        PolicyName: CFCodePipeCustPol
+      
+  
+  InfraArtifactsBucket:
+    DeletionPolicy: Delete
+    Description: Creating Amazon S3 bucket for AWS CodePipeline and CodeBuild artifacts
+    Properties:
+      Tags:
+      - Key: Name
+        Value: infracodepipelineacbucketac
+      VersioningConfiguration:
+        Status: Enabled
+    Type: AWS::S3::Bucket
+
+  InfraDeployPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+    - InfraCodePipelineTrustRole
+    - InfraArtifactsBucket
+    Description: Creating a deployment pipeline for your project in AWS CodePipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref 'InfraArtifactsBucket'
+        Type: S3
+      Name: InfraDeploypipeline
+      RoleArn: !GetAtt
+      - InfraCodePipelineTrustRole
+      - Arn
+      Stages:
+      - Name: Source
+        Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Provider: CodeCommit
+            Version: 1
+          Configuration:
+            BranchName: main
+            PollForSourceChanges: false
+            RepositoryName: infrapipelinerepo
+          InputArtifacts: [
+            ]
+          Name: ApplicationSource
+          # OutputArtifacts: [
+
+          # ]
+          OutputArtifacts:
+          - Name: infrabuildsrc
+          RunOrder: 1
+      - Name: InfraDeploy
+        Actions:
+        - ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: 1
+          Configuration:
+            ActionMode: CREATE_UPDATE
+            StackName: infrastack
+            Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+            RoleArn: !GetAtt CloudFormCodePipelineTrustRole.Arn
+            TemplatePath: infrabuildsrc::deployinra.yml
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: infrabuildsrc
+          Name: InfraDeploy
+      - Name: EKSClusterDeploy
+        Actions:
+        - ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Provider: CloudFormation
+            Version: 1
+          Configuration:
+            ActionMode: CREATE_UPDATE
+            StackName: eksclusterstack
+            Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+            RoleArn: !GetAtt CloudFormCodePipelineTrustRole.Arn
+            TemplatePath: infrabuildsrc::ekscluster.yml
+          OutputArtifacts: []
+          InputArtifacts:
+            - Name: infrabuildsrc
+          Name: EksDeploy
